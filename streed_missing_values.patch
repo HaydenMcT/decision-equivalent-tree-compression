@@ -1,0 +1,234 @@
+diff --git a/include/model/data.h b/include/model/data.h
+index bbbfd79..2730138 100644
+--- a/include/model/data.h
++++ b/include/model/data.h
+@@ -17,7 +17,7 @@ namespace STreeD {
+ 	class AInstance {
+ 	public:
+ 		AInstance() = delete;
+-		AInstance(int id, const std::vector<bool>& feature_vector) : id(id), features(feature_vector, id), weight(1.0) {}
++		AInstance(int id, const std::vector<char>& feature_vector) : id(id), features(feature_vector, id), weight(1.0) {}
+ 
+ 		// The unique identifier of this instance
+ 		inline const int GetID() const { return id; }
+@@ -30,6 +30,9 @@ namespace STreeD {
+ 
+ 		// Check if this instance satisfies a feature
+ 		inline bool IsFeaturePresent(int feature) const { return features.IsFeaturePresent(feature); }
++
++		// Check if this instance contains a non-missing value for a feature
++		inline bool IsFeatureMissing(int feature) const { return features.IsFeatureMissing(feature); }
+ 		
+ 		// Return the total number of features that are satisfied (present) in this instance
+ 		inline int NumPresentFeatures() const { return features.NumPresentFeatures(); }
+@@ -73,7 +76,7 @@ namespace STreeD {
+ 	class LInstance : public AInstance {
+ 	public:
+ 		LInstance() = delete;
+-		LInstance(int id, const std::vector<bool>& feature_vector, LT label)
++		LInstance(int id, const std::vector<char>& feature_vector, LT label)
+ 			: AInstance(id, feature_vector), label(label) { }
+ 
+ 		// Get the label of the instance
+@@ -90,7 +93,7 @@ namespace STreeD {
+ 	class Instance : public LInstance<LT> {
+ 	public:
+ 		Instance() = delete;
+-		Instance(int id, const std::vector<bool>& feature_vector, LT label, ET extra_data = ET())
++		Instance(int id, const std::vector<char>& feature_vector, LT label, ET extra_data = ET())
+ 			: LInstance<LT>(id, feature_vector, label), extra_data(extra_data) {}
+ 
+ 		// Get the extra data (data beyond the feature vector and label of the instance
+diff --git a/include/model/feature_vector.h b/include/model/feature_vector.h
+index 1c28f29..1e4d763 100644
+--- a/include/model/feature_vector.h
++++ b/include/model/feature_vector.h
+@@ -9,11 +9,12 @@ namespace STreeD {
+ 
+ 	class FeatureVector {
+ 	public:
+-		FeatureVector(const std::vector<bool>& feature_values, int id);
++		FeatureVector(const std::vector<char>& feature_values, int id);
+ 		FeatureVector(const FeatureVector& fv);
+ 		~FeatureVector();
+ 
+ 		inline bool IsFeaturePresent(const int feature) const { return is_feature_present_[feature]; }
++		inline bool IsFeatureMissing(const int feature) const { return is_feature_missing_[feature]; }
+ 		inline int GetJthPresentFeature(const int j) const { runtime_assert(j < num_present_features); return present_features_[j]; }
+ 		inline int NumPresentFeatures() const { return int(num_present_features); }
+ 		inline int NumTotalFeatures() const { return num_features; }
+@@ -58,6 +59,7 @@ namespace STreeD {
+ 		int id;
+ 		int num_features;
+ 		int num_present_features;
++		bool* is_feature_missing_;
+ 		bool* is_feature_present_; //[i] indicates if the feature is true or false, i.e., if it is present in present_Features.
+ 		int* present_features_;
+ 		std::vector<int> present_feature_pair_indices_;
+diff --git a/src/bindings.cpp b/src/bindings.cpp
+index d6ba557..9afcdd6 100644
+--- a/src/bindings.cpp
++++ b/src/bindings.cpp
+@@ -64,7 +64,7 @@ void NumpyToSTreeDData(const py::array_t<int, py::array::c_style>& _X,
+     std::vector<std::vector<const AInstance*>> instances_per_label;
+     if (regression) instances_per_label.resize(1);
+     ET ed;
+-    std::vector<bool> v(num_features);
++    std::vector<char> v(num_features);
+     for (py::size_t i = 0; i < num_instances; i++) {
+         LT label = y.size() == 0 ? 0 : y(i);
+         if(extra_data.size() > 0) {
+@@ -87,9 +87,9 @@ void NumpyToSTreeDData(const py::array_t<int, py::array::c_style>& _X,
+ 	data_view = ADataView(&data, instances_per_label, {});
+ }
+ 
+-std::vector<bool> NumpyRowToBoolVector(const py::array_t<int, py::array::c_style>& _X) {
++std::vector<char> NumpyRowToBoolVector(const py::array_t<int, py::array::c_style>& _X) {
+     auto X = _X.template unchecked<1>();
+-    std::vector<bool> v(X.shape(0));
++    std::vector<char> v(X.shape(0));
+     for (py::size_t j = 0; j < X.shape(0); j++) {
+         v[j] = X(j);
+     }
+diff --git a/src/model/data.cpp b/src/model/data.cpp
+index a1a0988..e3a1b56 100644
+--- a/src/model/data.cpp
++++ b/src/model/data.cpp
+@@ -39,7 +39,10 @@ namespace STreeD {
+ 			left.instances[label].reserve(_instances.size());
+ 			right.instances[label].reserve(_instances.size());
+ 			for (auto instance : _instances) {
+-				if (instance->IsFeaturePresent(feature)) {
++				if (instance->IsFeatureMissing(feature)) {
++					left.instances[label].push_back(instance);
++					right.instances[label].push_back(instance);
++				} else if (instance->IsFeaturePresent(feature)) {
+ 					right.instances[label].push_back(instance);
+ 				} else {
+ 					left.instances[label].push_back(instance);
+@@ -47,9 +50,13 @@ namespace STreeD {
+ 			}
+ 			left.size += int(left.instances[label].size());
+ 			right.size += int(right.instances[label].size());
+-			runtime_assert(left.instances[label].size() + right.instances[label].size() == _instances.size());
++			runtime_assert(left.instances[label].size() <= _instances.size());
++			runtime_assert(right.instances[label].size() <= _instances.size());
++			runtime_assert(left.instances[label].size() + right.instances[label].size() >= _instances.size());
+ 		}
+-		runtime_assert(left.size + right.size == size);
++		runtime_assert(left.size <= size);
++		runtime_assert(right.size <= size);
++		runtime_assert(left.size + right.size >= size);
+ 	}
+ 
+ 	template<class LT>
+diff --git a/src/model/feature_vector.cpp b/src/model/feature_vector.cpp
+index 9504155..75bd8d6 100644
+--- a/src/model/feature_vector.cpp
++++ b/src/model/feature_vector.cpp
+@@ -8,26 +8,36 @@ https://bitbucket.org/EmirD/murtree
+ 
+ namespace STreeD {
+ 
+-	FeatureVector::FeatureVector(const std::vector<bool>& feature_values, int id) :
++	// Change from Streed: feature vectors are now chars instead of bools;
++	// 1 means true, 0 means false, -1 means missing
++	// present_features initially refers to true and not missing; not to false or missing
++	// TODO: ensuring that invariant is a todo; since features can be flipped.
++	// TODO: depth 2 solving logic, around co-present features, won't be valid out-of-the-box for
++	// missing features; needs to be adapted or turned off. (count AB, A_miB, AB_mi, A_miB_mi)
++	FeatureVector::FeatureVector(const std::vector<char>& feature_values, int id) :
+ 		id(id), num_features(int(feature_values.size())) {
+ 		is_feature_present_ = new bool[feature_values.size()];
++		is_feature_missing_ = new bool[feature_values.size()];
+ 		num_present_features = 0;
+ 		for (int feature_index = 0; feature_index < int(feature_values.size()); feature_index++) 
+-			if (feature_values[feature_index]) num_present_features++;
++			if (feature_values[feature_index] == 1) num_present_features++;
+ 		present_features_ = new int[num_features];
+ 		int present_feature_ix = 0;
+ 		for (int feature_index = 0; feature_index < int(feature_values.size()); feature_index++) {
+-			if (feature_values[feature_index]) { present_features_[present_feature_ix++] = feature_index; }
+-			is_feature_present_[feature_index] = bool(feature_values[feature_index]);
++			if (feature_values[feature_index] == 1) { present_features_[present_feature_ix++] = feature_index; }
++			is_feature_present_[feature_index] = (feature_values[feature_index] == 1);
++			is_feature_missing_[feature_index] = (feature_values[feature_index] == -1);
+ 		}
+ 	}
+ 
+ 	FeatureVector::FeatureVector(const FeatureVector& fv) 
+ 		: id(fv.id), num_features(fv.num_features), num_present_features(fv.num_present_features) {
+ 		is_feature_present_ = new bool[fv.num_features];
++		is_feature_missing_ = new bool[fv.num_features];
+ 		int num_present_features = 0;
+ 		for (int i = 0; i < fv.num_features; i++) {
+ 			is_feature_present_[i] = fv.is_feature_present_[i];
++			is_feature_missing_[i] = fv.is_feature_missing_[i];
+ 		}
+ 		present_features_ = new int[num_features];
+ 		for (int i = 0; i < fv.NumPresentFeatures(); i++) {
+@@ -39,6 +49,7 @@ namespace STreeD {
+ 	FeatureVector::~FeatureVector() {
+ 		delete[] is_feature_present_;
+ 		delete[] present_features_;
++		delete[] is_feature_missing_;
+ 	}
+ 
+ 	double FeatureVector::Sparsity() const {
+diff --git a/src/pystreed/base.py b/src/pystreed/base.py
+index 9ff0d62..a877494 100644
+--- a/src/pystreed/base.py
++++ b/src/pystreed/base.py
+@@ -239,7 +239,7 @@ class BaseSTreeDSolver(BaseEstimator):
+         """
+         pass
+ 
+-    def fit(self, X, y, extra_data=None, categorical=None) -> Self:
++    def fit(self, X, y, extra_data=None, categorical=None, skip_binarize=True) -> Self:
+         """
+         Fits a STreeD model to the given training data.
+ 
+@@ -264,7 +264,9 @@ class BaseSTreeDSolver(BaseEstimator):
+         """
+         # Validate params and data
+         self._validate_params()
+-        X = self._binarize_data(X, y, categorical)
++        self.skip_binarize = skip_binarize
++        if not skip_binarize:
++            X = self._binarize_data(X, y, categorical)
+         X, y = self._process_fit_data(X, y)
+         extra_data = self._process_extra_data(X, extra_data)
+         # Store train data
+@@ -321,7 +323,8 @@ class BaseSTreeDSolver(BaseEstimator):
+             The i-th element in this array corresponds to the predicted target variable for the i-th instance in `x`.
+         """
+         check_is_fitted(self, "fit_result")
+-        X = self._binarize_data(X, reset=False)
++        if not self.skip_binarize:
++            X = self._binarize_data(X, reset=False)
+         X = self._process_predict_data(X)
+         extra_data = self._process_extra_data(X, extra_data)
+         return self._solver._predict(self.fit_result, X, extra_data)
+@@ -346,7 +349,8 @@ class BaseSTreeDSolver(BaseEstimator):
+         The score
+         """
+         check_is_fitted(self, "fit_result")
+-        X = self._binarize_data(X, reset=False)
++        if not self.skip_binarize:
++            X = self._binarize_data(X, reset=False)
+         X, y_true = self._process_score_data(X, y_true)
+         extra_data = self._process_extra_data(X, extra_data)
+         self.test_result = self._solver._test_performance(self.fit_result, X, y_true, extra_data)
+diff --git a/src/utils/file_reader.cpp b/src/utils/file_reader.cpp
+index 5bc827f..d51c61e 100644
+--- a/src/utils/file_reader.cpp
++++ b/src/utils/file_reader.cpp
+@@ -133,7 +133,7 @@ namespace STreeD {
+ 			num_features = std::min(num_features, max_num_features);
+ 			iss = std::istringstream(line);
+ 
+-			std::vector<bool> v(num_features);
++			std::vector<char> v(num_features);
+ 			for (int i = 0; i < num_features; i++) {
+ 				uint32_t temp;
+ 				iss >> temp;
