@@ -14,7 +14,7 @@ The AdaBoost experiments (Tables 2–4) also need `pystreed`, built from a modif
 partitions (a feature value of `-1` means missing). A patch file is included, and can be installed (with virtual environment active)
 by running
 
-  ```
+  ```bash
   git clone https://github.com/AlgTUDelft/pystreed.git
   cd pystreed
   git checkout c059f87 # the commit we used for our experiments; though later commits are unlikely to break functionality
